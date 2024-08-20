@@ -94,8 +94,10 @@ ixgbe_tx_free_bufs(struct ixgbe_tx_queue *txq)
 	 * tx_next_dd - (tx_rs_thresh-1)
 	 */
 	txep = &txq->sw_ring_v[txq->tx_next_dd - (n - 1)];
-	m = rte_pktmbuf_prefree_seg(txep[0].mbuf);
-	if (likely(m != NULL)) {
+	// m = rte_pktmbuf_prefree_seg(txep[0].mbuf);
+	// if (likely(m != NULL)) {
+	if (likely(txep[0].mbuf &&
+			(m = rte_pktmbuf_prefree_seg(txep[0].mbuf)) != NULL)) {
 		free[0] = m;
 		nb_free = 1;
 		for (i = 1; i < n; i++) {

@@ -554,10 +554,10 @@ tx_desc_ol_flags_to_cmdtype(uint64_t ol_flags)
 
 /* Default RS bit threshold values */
 #ifndef DEFAULT_TX_RS_THRESH
-#define DEFAULT_TX_RS_THRESH   32
+#define DEFAULT_TX_RS_THRESH   64
 #endif
 #ifndef DEFAULT_TX_FREE_THRESH
-#define DEFAULT_TX_FREE_THRESH 32
+#define DEFAULT_TX_FREE_THRESH 64
 #endif
 
 /* Reset transmit descriptors after they have been used */
@@ -2546,7 +2546,8 @@ void __rte_cold
 ixgbe_set_tx_function(struct rte_eth_dev *dev, struct ixgbe_tx_queue *txq)
 {
 	/* Use a simple Tx queue (no offloads, no multi segs) if possible */
-	if ((txq->offloads == 0) &&
+	// if ((txq->offloads == 0) &&
+	if ((txq->offloads & ~(RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_TX_OFFLOAD_UDP_CKSUM | RTE_ETH_TX_OFFLOAD_TCP_CKSUM)) == 0 &&
 #ifdef RTE_LIB_SECURITY
 			!(txq->using_ipsec) &&
 #endif
@@ -2613,6 +2614,41 @@ ixgbe_get_tx_port_offloads(struct rte_eth_dev *dev)
 #endif
 	return tx_offload_capa;
 }
+ 
+static uint16_t
+install_txq_ctx(struct ixgbe_tx_queue *txq, uint16_t slot,
+	const uint64_t flags, const union ixgbe_tx_offload tx_offload)
+{
+	/* This must be called before any packets are placed in the ring */
+	ASSERT(txq->tx_tail == 0);
+	ASSERT(((struct ixgbe_tx_entry_v *)txq->sw_ring_v)->mbuf == NULL);
+	ASSERT(txq->nb_tx_free >= txq->tx_free_thresh);
+	ASSERT(txq->nb_tx_desc > 0);
+	ASSERT(txq->nb_tx_free >= 1);
+	ASSERT(slot < IXGBE_CTX_NUM);
+
+
+	uint64_t tx_ol_req = flags & IXGBE_TX_OFFLOAD_MASK;
+
+	volatile union ixgbe_adv_tx_desc *txr = txq->tx_ring;
+	volatile struct ixgbe_adv_tx_context_desc *ctx_txd;
+	ctx_txd = (volatile struct ixgbe_adv_tx_context_desc *)txr;
+
+	txq->ctx_curr = slot;
+	ixgbe_set_xmit_ctx(txq, ctx_txd, tx_ol_req,
+		tx_offload, NULL);
+
+	txq->nb_tx_used = (uint16_t)(txq->nb_tx_used + 1);
+	txq->nb_tx_free = (uint16_t)(txq->nb_tx_free - 1);
+
+	PMD_TX_LOG(DEBUG, "port_id=%u queue_id=%u tx_tail=%u nb_tx=%u",
+		   (unsigned) txq->port_id, (unsigned) txq->queue_id,
+		   (unsigned) 1, (unsigned) 1);
+	IXGBE_PCI_REG_WRITE_RELAXED(txq->tdt_reg_addr, 1);
+	txq->tx_tail = 1;
+	return 1;
+}
+
 
 int __rte_cold
 ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
@@ -2814,6 +2850,15 @@ ixgbe_dev_tx_queue_setup(struct rte_eth_dev *dev,
 
 	dev->data->tx_queues[queue_idx] = txq;
 
+	uint64_t olflags = RTE_MBUF_F_TX_IP_CKSUM | RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_TCP_CKSUM;
+	union ixgbe_tx_offload tx_offloads;
+	memset(&tx_offloads, 0, sizeof(tx_offloads));
+	tx_offloads.l2_len = RTE_ETHER_HDR_LEN;
+	tx_offloads.l3_len = sizeof(struct rte_ipv4_hdr);
+	tx_offloads.l4_len = sizeof(struct rte_tcp_hdr);
+
+	if (install_txq_ctx(txq, 0, olflags, tx_offloads) != 1)
+		return -EINVAL;
 
 	return 0;
 }
